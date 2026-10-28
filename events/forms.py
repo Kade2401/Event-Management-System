@@ -1,11 +1,9 @@
-
 from django import forms
-from .models import Event, Attendee
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
 
-from django import forms
-from .models import Event
+from .models import Event, Attendee
+
 
 class EventForm(forms.ModelForm):
     VISIBILITY_CHOICES = [
@@ -45,7 +43,8 @@ class EventForm(forms.ModelForm):
                 }
             ),
         }
-    def __init__(self, *args,user=None, **kwargs):
+
+    def __init__(self, *args, user=None, **kwargs):
         instance = kwargs.get("instance")
         super().__init__(*args, **kwargs)
 
@@ -75,10 +74,12 @@ class AttendeeForm(forms.ModelForm):
             })
         }
 
+
 class RegisterForm(UserCreationForm):
     class Meta:
         model = User
         fields = ("username", "password1", "password2")
+
 
 class AttendeeRoleForm(forms.ModelForm):
     class Meta:

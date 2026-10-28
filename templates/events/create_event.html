@@ -10,8 +10,8 @@
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
   />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <body>
   <div class="particle"></div>
   <div class="particle"></div>
@@ -112,7 +112,11 @@
     container.style.display = isOpen ? "none" : "block";
     btn.classList.toggle("active", !isOpen);
 
-    if (!map) initMap();
+    if (!map) {
+      initMap();
+    } else if (!isOpen) {
+      setTimeout(() => map.invalidateSize(), 150);
+    }
   }
 
   function initMap() {
@@ -123,6 +127,7 @@
     }).addTo(map);
 
     map.on("click", onMapClick);
+    setTimeout(() => map.invalidateSize(), 150);
   }
 
   function onMapClick(e) {

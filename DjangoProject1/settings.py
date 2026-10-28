@@ -22,10 +22,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-%3sa@l6iucafz(^z%@d*qw+o3*^v293z@%43dm^ltj^cul$_w$'
+SECRET_KEY = os.getenv(
+    'SECRET_KEY',
+    'django-insecure-%3sa@l6iucafz(^z%@d*qw+o3*^v293z@%43dm^ltj^cul$_w$'
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'event_list'
@@ -138,7 +141,15 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
 
 CSRF_TRUSTED_ORIGINS = [
     "https://*.onrender.com",

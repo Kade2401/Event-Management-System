@@ -1,25 +1,24 @@
-from django.shortcuts import render, get_object_or_404, redirect
-from django.contrib import messages
-from django.contrib.auth.models import User
-from .models import Event, Attendee
-from .forms import EventForm, AttendeeForm
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+from datetime import datetime, time
 import json
-from django.contrib.auth import login
-from .forms import RegisterForm
+
+from django.contrib import messages
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth import logout
-from django.contrib.auth import authenticate, login
-from django.shortcuts import redirect
-from django.utils import timezone
-from django.views.generic import ListView 
-from .utils import is_global_manager
-from django.db.models import Q
-from django.urls import reverse
-from django.http import HttpResponseForbidden
+from django.contrib.auth.models import User
+from django.db.models import Count, F, Q
 from django.db.models.signals import pre_delete
 from django.dispatch import receiver
+from django.http import HttpResponseForbidden, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from django.views.generic import ListView
+
+from .forms import AttendeeForm, EventForm, RegisterForm
+from .models import Attendee, Event
+from .utils import is_global_manager
+
 
 @login_required
 def event_list(request):
@@ -30,35 +29,48 @@ def event_list(request):
     ).filter(
         owner__isnull=False
     ).distinct()
-    
+
     date_from = request.GET.get('date_from')
     date_to = request.GET.get('date_to')
-    
+
     if date_from:
-        queryset = queryset.filter(date__gte=date_from)
+        try:
+            date_from_dt = datetime.combine(
+                datetime.fromisoformat(date_from).date(),
+                time(0, 0, 0)
+            )
+            if timezone.is_naive(date_from_dt):
+                date_from_dt = timezone.make_aware(date_from_dt)
+            queryset = queryset.filter(date__gte=date_from_dt)
+        except ValueError:
+            pass
+
     if date_to:
-        from datetime import datetime, time
-        date_to_datetime = datetime.combine(
-            datetime.fromisoformat(date_to).date(),
-            time(23, 59, 59)
-        )
-        queryset = queryset.filter(date__lte=date_to_datetime)
-    
+        try:
+            date_to_datetime = datetime.combine(
+                datetime.fromisoformat(date_to).date(),
+                time(23, 59, 59)
+            )
+            if timezone.is_naive(date_to_datetime):
+                date_to_datetime = timezone.make_aware(date_to_datetime)
+            queryset = queryset.filter(date__lte=date_to_datetime)
+        except ValueError:
+            pass
+
     availability = request.GET.get('availability', 'all')
-    
+
     if availability != 'all':
-        from django.db.models import Count, F
         queryset = queryset.annotate(
-            attendees_count=Count('attendees')
+            attendees_count=Count('attendees', distinct=True)
         )
-        
+
         if availability == 'available':
             queryset = queryset.filter(capacity__gt=F('attendees_count'))
         elif availability == 'full':
             queryset = queryset.filter(capacity__lte=F('attendees_count'))
-    
+
     sort_by = request.GET.get('sort_by', 'date')
-    
+
     if sort_by == 'date':
         queryset = queryset.order_by('-date')
     elif sort_by == 'date_asc':
@@ -67,7 +79,7 @@ def event_list(request):
         queryset = queryset.order_by('name')
     elif sort_by == 'name_desc':
         queryset = queryset.order_by('-name')
-    
+
     context = {
         'events': queryset,
         'date_from': date_from,
@@ -77,17 +89,20 @@ def event_list(request):
     }
     return render(request, 'events/event_list.html', context)
 
+
 @login_required
 def delete_event(request, event_id):
     event = get_object_or_404(Event, id=event_id)
+    if event.owner != request.user and not request.user.is_superuser:
+        messages.error(request, "You can't delete this event.")
+        return redirect("event_detail", event_id=event.id)
+
     if request.method == 'POST':
         event_name = event.name
         event.delete()
         messages.error(request, f"Event '{event_name}' has been deleted.")
         return redirect('event_list')
     return render(request, 'events/confirm_delete.html', {'event': event})
-
-from django.http import HttpResponseForbidden
 
 
 @login_required
@@ -124,19 +139,20 @@ def event_detail(request, event_id):
 
     if event.invite_only:
         if not (
-                request.user == event.owner
-                or request.user in event.invited_users.all()
-                or request.user.is_superuser
+            request.user == event.owner
+            or request.user in event.invited_users.all()
+            or request.user.is_superuser
         ):
             return redirect("event_list")
 
     is_owner = (event.owner == request.user)
     is_invited = event.invited_users.filter(id=request.user.id).exists()
     is_public_global = (event.is_global and not event.invite_only)
-    is_joined = event.attendees.filter(user=request.user).exists()
+    is_joined = event.attendees.filter(
+        Q(user=request.user) | Q(name=request.user.username)
+    ).exists()
 
-
-    can_view = is_owner or is_invited or is_public_global
+    can_view = is_owner or is_invited or is_public_global or request.user.is_superuser
     if not can_view:
         return HttpResponseForbidden("You don't have access to this event.")
 
@@ -163,6 +179,7 @@ def event_detail(request, event_id):
         "is_invited": is_invited,
         "is_joined": is_joined,
     })
+
 
 @login_required
 def create_event(request):
@@ -198,6 +215,7 @@ def create_event(request):
 
     return render(request, "events/create_event.html", {"form": form})
 
+
 @login_required
 def edit_event(request, event_id):
     event = get_object_or_404(Event, id=event_id)
@@ -219,12 +237,10 @@ def edit_event(request, event_id):
 
             visibility = form.cleaned_data.get("visibility") or "none"
 
-            if visibility == "global":
-                if not is_global_manager(request.user):
-                    messages.error(request, "Only globals group can create global events.")
-                    return redirect("event_list")
-                event.is_global = True
-                event.invite_only = False
+            if visibility == "global" and not is_global_manager(request.user):
+                messages.error(request, "Only globals group can create global events.")
+                return redirect("event_list")
+
             updated_event = form.save(commit=False)
 
             if visibility == "global":
@@ -243,7 +259,7 @@ def edit_event(request, event_id):
             messages.success(request, "Event updated!")
             return redirect("event_detail", event_id=updated_event.id)
     else:
-        form = EventForm(instance=event)
+        form = EventForm(instance=event, user=request.user)
 
     return render(request, "events/edit_event.html", {"form": form, "event": event})
 
@@ -274,6 +290,7 @@ def register_attendee(request, event_id):
                 )
                 messages.info(request, f"{name} successfully registered!")
     return redirect('event_detail', event_id=event.id)
+
 
 @login_required
 def update_attendee_role(request, event_id, attendee_id):
@@ -308,6 +325,7 @@ def remove_attendee(request, event_id, attendee_id):
 
     return redirect("event_detail", event_id=event.id)
 
+
 def api_event_list(request):
     if request.method == 'GET':
         events = Event.objects.all().values(
@@ -315,11 +333,16 @@ def api_event_list(request):
         )
         return JsonResponse(list(events), safe=False)
 
+
 @csrf_exempt
 def api_create_event(request):
     if request.method == 'POST':
         data = json.loads(request.body)
+        owner = request.user if request.user.is_authenticated else User.objects.first()
+        if owner is None:
+            owner = User.objects.create_user(username="api_default_owner")
         event = Event.objects.create(
+            owner=owner,
             name=data['name'],
             date=data['date'],
             capacity=data['capacity']
@@ -329,6 +352,8 @@ def api_create_event(request):
             'event_id': event.id
         })
 
+
+@csrf_exempt
 def api_update_event(request, event_id):
     if request.method == "PUT":
         body = json.loads(request.body)
@@ -341,17 +366,24 @@ def api_update_event(request, event_id):
         event.save()
         return JsonResponse({"status": "updated"})
 
+
+@csrf_exempt
 def api_delete_event(request, event_id):
     if request.method == "DELETE":
         event = get_object_or_404(Event, id=event_id)
         event.delete()
         return JsonResponse({"status": "deleted"})
 
+
 def register(request):
     if request.method == 'POST':
-        username = request.POST.get('username')
-        password = request.POST.get('password')
-        password2 = request.POST.get('password2')
+        username = (request.POST.get('username') or '').strip()
+        password = request.POST.get('password') or ''
+        password2 = request.POST.get('password2', password)
+
+        if not username or not password:
+            messages.error(request, 'Username and password are required')
+            return render(request, 'registration/register.html')
 
         if User.objects.filter(username=username).exists():
             messages.error(request, 'Login taken')
@@ -363,38 +395,42 @@ def register(request):
 
         User.objects.create_user(username=username, password=password)
         messages.success(request, 'Account created!')
-        return redirect('login') 
-        
+        return redirect('login')
+
     return render(request, 'registration/register.html')
+
 
 def user_login(request):
     if request.method == 'POST':
         u = request.POST.get('username')
         p = request.POST.get('password')
         user = authenticate(username=u, password=p)
-        
+
         if user:
             login(request, user)
             return redirect('profile')
         else:
             messages.error(request, 'Invalid username or password')
-            return render(request, 'registration/login.html') 
+            return render(request, 'registration/login.html')
     return render(request, 'registration/login.html')
+
 
 def user_logout(request):
     logout(request)
     return redirect('login')
+
 
 @login_required
 def delete_account(request):
     if request.method == 'POST':
         user = request.user
         logout(request)
-        user.delete() 
-        
+        user.delete()
+
         messages.success(request, 'Account deleted')
         return redirect('register')
     return redirect('profile')
+
 
 @login_required
 def profile(request):
@@ -406,42 +442,58 @@ def profile(request):
     }
     return render(request, 'events/profile.html', context)
 
+
 class EventListView(ListView):
     model = Event
     template_name = 'events/event_list.html'
     context_object_name = 'events'
-    
+
     def get_queryset(self):
         queryset = super().get_queryset()
         if self.request.GET.get('search'):
             queryset = queryset.filter(name__icontains=self.request.GET['search'].strip())
         if self.request.GET.get('future_only'):
-            queryset = queryset.filter(date__gte=timezone.now().date())
+            queryset = queryset.filter(date__gte=timezone.now())
         return queryset.order_by('date')
-    
+
+
 @login_required
 def invite_checkin(request, token):
     event = get_object_or_404(Event, qr_token=token, invite_only=True)
+    already_attending = event.attendees.filter(
+        Q(user=request.user) | Q(name=request.user.username)
+    ).exists()
 
-    if event.attendees.count() >= event.capacity:
+    if event.is_full() and not already_attending:
         messages.error(request, "Event is full.")
         return redirect("event_list")
 
     if request.method == "POST":
         event.invited_users.add(request.user)
 
-        Attendee.objects.get_or_create(
-            event=event,
-            name=request.user.username,
-            defaults={"role": "invited"}
-        )
+        existing = event.attendees.filter(
+            Q(user=request.user) | Q(name=request.user.username)
+        ).first()
+        if existing:
+            if existing.user is None:
+                existing.user = request.user
+                existing.save(update_fields=["user"])
+        else:
+            Attendee.objects.create(
+                event=event,
+                user=request.user,
+                name=request.user.username,
+                role="invited"
+            )
 
         messages.success(request, "Invitation accepted! Event added to your list.")
         return redirect("event_detail", event_id=event.id)
 
     return render(request, "events/invite_checkin.html", {
-        "event": event
+        "event": event,
+        "is_full": event.is_full(),
     })
+
 
 @login_required
 def join_event(request, event_id):
@@ -450,18 +502,30 @@ def join_event(request, event_id):
     if request.method != "POST":
         return redirect("event_detail", event_id=event.id)
 
+    existing = event.attendees.filter(
+        Q(user=request.user) | Q(name=request.user.username)
+    ).first()
+    if existing:
+        if existing.user is None:
+            existing.user = request.user
+            existing.save(update_fields=["user"])
+        messages.success(request, "You are registered for this global event!")
+        return redirect("event_detail", event_id=event.id)
+
     if event.is_full():
         messages.error(request, "Event is full!")
         return redirect("event_detail", event_id=event.id)
 
-    Attendee.objects.get_or_create(
+    Attendee.objects.create(
         event=event,
         user=request.user,
-        defaults={"name": request.user.username, "role": "guest"}
+        name=request.user.username,
+        role="guest"
     )
 
     messages.success(request, "You are registered for this global event!")
     return redirect("event_detail", event_id=event.id)
+
 
 @receiver(pre_delete, sender=Event)
 def cleanup_event(sender, instance, **kwargs):
